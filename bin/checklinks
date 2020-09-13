@@ -1,0 +1,164 @@
+#!/usr/bin/env ruby
+
+require 'set'
+require 'yaml'
+
+require 'checklinks'
+
+# Process command line arguments
+
+files = []
+config = {}
+
+args = ARGV.dup
+until args.empty?
+  arg = args.shift
+  if arg.start_with?('-')
+    case arg
+    when '--config'
+      config_file = args.shift
+      raise unless config_file
+      config = YAML.load(File.read(config_file))
+    else
+      raise
+    end
+  else
+    files.push arg
+  end
+end
+
+# Create worklists - ahead of processing anything as they refer to each other cylically
+
+file_worklist = Checklinks::Worklist.new(*files.shuffle)
+url_worklist = Checklinks::Worklist.new
+link_collector = Checklinks::Worklist.collector
+status_worklist = Checklinks::Worklist.new
+error_collector = Checklinks::Worklist.collector
+
+# Process files to produce URLs and links
+
+file_worklist.process(Set.new) do |filename, found_urls|
+  File.open(filename, encoding: Encoding::UTF_8) do |file|
+    line_number = 1
+    file.each_line do |line|
+      urls = URI.extract(line, /http()s?/)
+      urls = Checklinks::Awesome.links_filter(urls)
+      urls.each do |url|
+        next unless found_urls.add?(url)
+        url_worklist.push url
+        link_collector.push [url, filename, line_number]
+      end
+      urls.shuffle!
+      line_number += 1
+    end
+  end
+end
+
+# Process URLs to produce status updates and errors
+
+url_worklist.process_concurrently(16) do |url|
+  status_worklist.push [:try, url]
+  if config.dig('ignore', 'exact')&.any? { |exact| url.start_with?(exact) } ||
+      config.dig('ignore', 'prefixes')&.any? { |prefix| url.start_with?(prefix) } ||
+      config.dig('ignore', 'suffixes')&.any? { |suffix| url.end_with?(suffix) }
+    status_worklist.push [:ignored]
+    next
+  end
+  begin
+    code, headers = Checklinks::Awesome.net_status(url, true)
+  rescue Errno::ECONNREFUSED
+    code = :refused
+  rescue Errno::ETIMEDOUT, Net::OpenTimeout, Net::ReadTimeout
+    code = :timeout
+  rescue OpenSSL::SSL::SSLError
+    code = :https
+  rescue => e
+    code = e.class.name
+  end
+  if code == 200
+    status_worklist.push [:ok]
+  else
+    if (301..302).include?(code) && (config.dig('ignore', 'redirect', 'exact')&.any? { |exact| url.start_with?(exact) } ||
+        config.dig('ignore', 'redirect', 'prefixes')&.any? { |prefix| url.start_with?(prefix) } ||
+        config.dig('ignore', 'redirect', 'suffixes')&.any? { |suffix| url.end_with?(suffix) })
+      status_worklist.push [:ignored]
+      next
+    end
+    if code == 403 && (config.dig('ignore', 'forbidden', 'exact')&.any? { |exact| url.start_with?(exact) } ||
+        config.dig('ignore', 'forbidden', 'prefixes')&.any? { |prefix| url.start_with?(prefix) } ||
+        config.dig('ignore', 'forbidden', 'suffixes')&.any? { |suffix| url.end_with?(suffix) })
+      status_worklist.push [:ignored]
+      next
+    end
+    status_worklist.push [:error]
+    error_collector.push [url, code, headers]
+  end
+end
+
+# Process status updates to print progress on the screen
+
+status_worklist.process({ok: 0, error: 0, ignored: 0, clear: 0}) do |message, state|
+  print "\r#{' '*state[:clear]}\r"
+  case message.first
+  when :try
+    puts message.last
+  when :ok
+    state[:ok] += 1
+  when :ignored
+    state[:ignored] += 1
+  when :error
+    state[:error] += 1
+    error_collector.push 
+  end
+  line = "[#{state[:ok].to_s.rjust(5)} ok, #{state[:ignored].to_s.rjust(5)} ignored, #{state[:error].to_s.rjust(5)} errors, #{file_worklist.size.to_s.rjust(5)} files left, #{url_worklist.size.to_s.rjust(5)} URLs left]"
+  print line
+  state[:clear] = line.length
+end
+
+# Run everything to conclusion
+
+Checklinks::Worklist.close file_worklist, url_worklist
+status_state = status_worklist.close
+links = link_collector.close
+errors = error_collector.close
+
+# Print a report
+
+puts "\r#{' '*status_state[:clear]}\r"
+
+if errors.empty?
+  puts 'Ok!'
+else
+  puts 'Errors:'
+
+  # Create a map of errored URLs back to their locations
+
+  urls = errors.map(&:first).to_set
+  url_links = {}
+  links.each do |url, filename, line_number|
+    next unless urls.include?(url)
+    references = url_links[url]
+    unless references
+      references = []
+      url_links[url] = references
+    end
+    references.push [filename, line_number]
+  end
+
+  # Print each error
+
+  errors.each do |url, code, headers|
+    message = code
+    if (301..302).include?(code)
+      message = "#{code} -> #{headers['location']}"
+    else
+      message = code
+    end
+    puts "  #{url} (#{message})"
+    url_links[url].each do |filename, line_number|
+      puts "    #{filename}:#{line_number}"
+    end
+  end
+end
+
+exit errors.empty?
