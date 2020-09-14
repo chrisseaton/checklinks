@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    checklinks (0.2.0)
+    checklinks (1.0.0)
 
 GEM
   remote: https://rubygems.org/
@@ -14,4 +14,4 @@ DEPENDENCIES
   checklinks!
 
 BUNDLED WITH
-   1.17.2
+   1.17.3
