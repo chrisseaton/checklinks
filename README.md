@@ -4,7 +4,7 @@ Checklinks finds broken or redirected links in a static webpage.
 
 ```
 % gem install checklinks
-% checklinks **/*.md
+% checklinks **.md
 ```
 
 It uses code from [awesome_bot](https://github.com/dkhamsing/awesome_bot), but the output is much more terse so it's easier to find which links are broken, and it also prints link locations which makes updating them easier.
@@ -12,7 +12,7 @@ It uses code from [awesome_bot](https://github.com/dkhamsing/awesome_bot), but t
 ## Configuration
 
 ```
-% checklinks --config .checklinks.yaml **/*.md
+% checklinks --config .checklinks.yaml **.md
 ```
 
 ```yaml
